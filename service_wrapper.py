@@ -13,7 +13,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import daemon_core
 
 class EDRAgentService(win32serviceutil.ServiceFramework):
-    # Industry standard internal name (no spaces)
+    # Standard internal name (no spaces)
     _svc_name_ = "EDRAgentService"
     # What the admin actually sees in services.msc
     _svc_display_name_ = "EDR Agent Background Service"

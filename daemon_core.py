@@ -5,7 +5,7 @@ from datetime import datetime
 import threading
 # --- removed pystray and PIL as a true system daemon cannot have a UI ---
 
-# --- CONFIGURATION (INDUSTRY GRADE) ---
+
 # System-wide services store binaries in Program Files, but MUST write data to ProgramData.
 PROGRAM_DATA_DIR = os.path.join(os.environ.get("PROGRAMDATA", "C:\\ProgramData"), "EDR_Agent")
 LOG_FILE = os.path.join(PROGRAM_DATA_DIR, "agent_heartbeat.log")
