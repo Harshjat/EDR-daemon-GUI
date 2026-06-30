@@ -1,5 +1,26 @@
 import wmi
 import sys
+import hashlib
+import os
+
+def get_file_hash(file_path):
+    """
+    WHAT: Calculates the SHA-256 hash of an executable file on disk.
+    WHY: To cryptographically identify the binary, ignoring its filename.
+    HOW: Reads the file in 4KB chunks so we don't consume massive amounts of RAM.
+    """
+    if file_path == "PATH_UNKNOWN" or not os.path.exists(file_path):
+        return "HASH_UNAVAILABLE"
+        
+    try:
+        sha256_hash = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for byte_block in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()
+    except Exception:
+        # Edge Case: Windows or an Antivirus might hold an exclusive lock on the file as it launches
+        return "HASH_FAILED_LOCKED"
 
 def main():
     print("--- EDR Sensor Test: WMI Process Watcher ---")
@@ -50,10 +71,15 @@ def main():
             # WMI stores the physical disk path in 'ExecutablePath'
             file_path = new_process.ExecutablePath if new_process.ExecutablePath else "PATH_UNKNOWN"
             
+            # --- NEW: THE ENRICHMENT ENGINE ---
+            # 6. Cryptographic Hash
+            file_hash = get_file_hash(file_path)
+            
             # Display the intercepted data
             print(f"[ALERT] New Process Detected: {proc_name} (PID: {pid})")
             print(f"   ├─ Parent PID : {ppid}")
             print(f"   ├─ File Path  : {file_path}")
+            print(f"   ├─ SHA-256    : {file_hash}")
             print(f"   └─ Command    : {cmd_line}\n")
             
     except KeyboardInterrupt:
