@@ -4,7 +4,8 @@ import os
 
 # Define the exact same system path our daemon is writing to
 PROGRAM_DATA_DIR = os.path.join(os.environ.get("PROGRAMDATA", "C:\\ProgramData"), "EDR_Agent")
-LOG_FILE = os.path.join(PROGRAM_DATA_DIR, "agent_heartbeat.log")
+# LOG_FILE = os.path.join(PROGRAM_DATA_DIR, "agent_heartbeat.log")
+LOG_FILE = os.path.join(PROGRAM_DATA_DIR, "agent_telemetry.log")
 
 class EDRAgentGUI:
     def __init__(self, root):
