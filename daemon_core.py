@@ -6,12 +6,17 @@ import hashlib
 import threading
 from datetime import datetime
 import wmi
-import pythoncom  # <--- NEW: Required for Windows Services to speak to COM/WMI
+import pythoncom
+import psutil  # Required for the Network Sensor
 
 # --- CONFIGURATION (INDUSTRY GRADE) ---
 PROGRAM_DATA_DIR = os.path.join(os.environ.get("PROGRAMDATA", "C:\\ProgramData"), "EDR_Agent")
-# We rename the log to reflect that it is now structured telemetry, not just heartbeats
 LOG_FILE = os.path.join(PROGRAM_DATA_DIR, "agent_telemetry.log")
+
+# --- THE MUTEX (Thread Lock) ---
+# Prevents the Process thread and Network thread from corrupting the JSON log
+# if they try to write at the exact same millisecond.
+FILE_LOCK = threading.Lock()
 
 def ensure_directories():
     """Ensure system-wide directories exist before writing."""
@@ -38,51 +43,38 @@ def write_telemetry(event_data):
     """
     try:
         ensure_directories()
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            # Convert the Python dictionary into a JSON string
-            json_string = json.dumps(event_data)
-            
-            # Write, flush memory, and force OS disk sync
-            f.write(json_string + "\n")
-            f.flush()
-            os.fsync(f.fileno())
+        
+        # HOW: We grab the Mutex before opening the file. 
+        # If another thread is writing, this thread waits here patiently.
+        with FILE_LOCK:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                json_string = json.dumps(event_data)
+                f.write(json_string + "\n")
+                f.flush()
+                os.fsync(f.fileno())
     except PermissionError:
-        # If the GUI is reading, drop the log to prevent a crash. 
-        # (In a true enterprise EDR, we would queue this in RAM and retry).
         pass
     except Exception:
         pass
 
 def agent_worker_loop(stop_event):
     """
-    WHAT: The true headless daemon worker that intercepts WMI events.
+    WHAT: The true headless daemon worker that intercepts WMI Process events.
     """
-    # --- THE CRITICAL OS FIX: COM INITIALIZATION ---
-    # We must explicitly tell the Windows Kernel to allow this specific 
-    # background thread to interact with the COM subsystem.
     pythoncom.CoInitialize() 
-    
     try:
         try:
-            # Initialize WMI connection
             c = wmi.WMI()
             process_watcher = c.watch_for(notification_type="Creation", wmi_class="Win32_Process")
         except Exception as e:
-            # If WMI fails (very rare), we log an error payload and exit the thread
             write_telemetry({"error": f"WMI Initialization Failed: {e}", "timestamp": datetime.now().isoformat()})
             return
 
-        # Run until the Service Control Manager (SCM) triggers the stop_event
         while not stop_event.is_set():
             try:
-                # HOW: timeout_ms=2000 prevents a Thread Deadlock.
-                # It waits 2 seconds for a process. If none start, it throws x_wmi_timed_out.
                 new_process = process_watcher(timeout_ms=2000)
-                
-                # --- CONTEXTUAL EXTRACTION ---
                 file_path = new_process.ExecutablePath if new_process.ExecutablePath else "PATH_UNKNOWN"
                 
-                # Construct the SIEM-ready JSON Payload
                 telemetry_payload = {
                     "timestamp": datetime.now().isoformat(),
                     "event_type": "ProcessCreate",
@@ -93,29 +85,85 @@ def agent_worker_loop(stop_event):
                     "sha256": get_file_hash(file_path),
                     "command_line": new_process.CommandLine if new_process.CommandLine else "ACCESS_DENIED_OR_EMPTY"
                 }
-                
-                # Save the JSON payload to disk
                 write_telemetry(telemetry_payload)
                 
             except wmi.x_wmi_timed_out:
-                # No process started in the last 2 seconds. 
-                # We simply 'pass' so the while loop can check if stop_event is set.
                 pass
             except Exception as e:
-                # Handle unexpected WMI parsing errors safely
                 time.sleep(1)
     finally:
-        # We must cleanly release the COM resources back to Windows when the service stops
         pythoncom.CoUninitialize()
 
+def network_worker_loop(stop_event):
+    """
+    WHAT: The Differential Network Sensor thread.
+    """
+    known_connections = set()
+    
+    while not stop_event.is_set():
+        try:
+            current_snapshot = set()
+            
+            for conn in psutil.net_connections(kind='inet'):
+                status = conn.status
+                if not status or status == "NONE":
+                    continue
+                
+                pid = conn.pid if conn.pid else 0
+                proto = "TCP" if conn.type == 1 else "UDP"
+                laddr = f"{conn.laddr.ip}:{conn.laddr.port}" if conn.laddr else "UNKNOWN"
+                raddr = f"{conn.raddr.ip}:{conn.raddr.port}" if conn.raddr else "0.0.0.0:0"
+                
+                fingerprint = f"{pid}_{proto}_{laddr}_{raddr}_{status}"
+                current_snapshot.add(fingerprint)
+                
+                if fingerprint not in known_connections:
+                    telemetry_payload = {
+                        "timestamp": datetime.now().isoformat(),
+                        "event_type": "NetworkConnection",
+                        "pid": pid,
+                        "protocol": proto,
+                        "local_address": laddr,
+                        "remote_address": raddr,
+                        "status": status
+                    }
+                    write_telemetry(telemetry_payload)
+                    known_connections.add(fingerprint)
+            
+            # Garbage Collection
+            known_connections = current_snapshot
+            
+            # Pause 1 second, but break immediately if Admin stops the service
+            stop_event.wait(1)
+            
+        except Exception:
+            time.sleep(1)
+
+def start_sensors(stop_event):
+    """
+    WHAT: Master function to spawn all sensor threads.
+    WHY: Keeps the service_wrapper clean and decoupled from the number of sensors.
+    """
+    proc_thread = threading.Thread(target=agent_worker_loop, args=(stop_event,), daemon=True)
+    net_thread = threading.Thread(target=network_worker_loop, args=(stop_event,), daemon=True)
+    
+    proc_thread.start()
+    net_thread.start()
+    
+    return [proc_thread, net_thread]
+
 def main():
-    """Fallback entry point if run directly instead of via the Service Wrapper."""
+    """Fallback entry point if run directly."""
     ensure_directories()
     stop_event = threading.Event()
     try:
-        agent_worker_loop(stop_event)
+        threads = start_sensors(stop_event)
+        while not stop_event.is_set():
+            time.sleep(1)
     except KeyboardInterrupt:
         stop_event.set()
+        for t in threads:
+            t.join()
 
 if __name__ == "__main__":
     main()
