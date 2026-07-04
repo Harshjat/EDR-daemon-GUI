@@ -45,8 +45,10 @@ class EDRAgentService(win32serviceutil.ServiceFramework):
         win32event.WaitForSingleObject(self.hWaitStop, win32event.INFINITE)
         
         # Wait for all worker threads to finish writing cleanly
+        # THE FIX: Add a 1-second timeout! 
+        # FIM and RIM use blocking APIs and might be asleep. This ensures we don't hang SCM.
         for t in sensor_threads:
-            t.join()
+            t.join(timeout=1.0)
 
 if __name__ == '__main__':
     if len(sys.argv) == 1:

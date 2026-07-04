@@ -10,8 +10,13 @@ import pythoncom
 import psutil  # Required for the Network Sensor
 import win32file
 import win32con
+import winreg
+import win32api
 
 FILE_LIST_DIRECTORY = 0x0001
+REG_NOTIFY_CHANGE_NAME = 0x00000001
+REG_NOTIFY_CHANGE_LAST_SET = 0x00000004
+
 FIM_ACTION_MAP = {
     1: "[CREATED]",
     2: "[DELETED]",
@@ -207,6 +212,84 @@ def fim_worker_loop(stop_event):
             
     win32file.CloseHandle(hDir)
 
+def get_registry_snapshot(hKey):
+    """Takes a point-in-time snapshot of the registry key."""
+    snapshot = {}
+    try:
+        index = 0
+        while True:
+            name, value, _ = winreg.EnumValue(hKey, index)
+            snapshot[name] = value
+            index += 1
+    except OSError:
+        pass
+    return snapshot
+
+def rim_worker_loop(stop_event):
+    """
+    WHAT: Registry Integrity Monitoring (RIM) Sensor Thread.
+    """
+    target_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    
+    try:
+        hKey = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, # <--- CHANGED FROM HKEY_CURRENT_USER
+            target_key, 
+            0, 
+            winreg.KEY_READ | winreg.KEY_NOTIFY
+        )
+    except Exception as e:
+        write_telemetry({"error": f"RIM Init Failed: {e}", "timestamp": datetime.now().isoformat()})
+        return
+
+    # Take baseline
+    known_state = get_registry_snapshot(hKey)
+
+    while not stop_event.is_set():
+        try:
+            # Blocking API call. Wakes up only on changes.
+            win32api.RegNotifyChangeKeyValue(
+                hKey, True, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET, None, False
+            )
+            
+            current_state = get_registry_snapshot(hKey)
+            
+            # Use FILE_LOCK automatically via write_telemetry
+            for name, value in current_state.items():
+                if name not in known_state:
+                    action_str = "ADDED"
+                elif known_state[name] != value:
+                    action_str = "MODIFIED"
+                else:
+                    continue
+                
+                write_telemetry({
+                    "timestamp": datetime.now().isoformat(),
+                    "event_type": "RegistryEvent",
+                    "action": action_str,
+                    "key_path": f"HKLM\\{target_key}", # <--- CHANGED TO HKLM
+                    "value_name": name,
+                    "payload": str(value)
+                })
+                    
+            for name in known_state.keys():
+                if name not in current_state:
+                    write_telemetry({
+                        "timestamp": datetime.now().isoformat(),
+                        "event_type": "RegistryEvent",
+                        "action": "DELETED",
+                        "key_path": f"HKLM\\{target_key}", # <--- CHANGED TO HKLM
+                        "value_name": name,
+                        "payload": ""
+                    })
+                    
+            known_state = current_state
+            
+        except Exception:
+            time.sleep(1)
+            
+    winreg.CloseKey(hKey)
+
 def start_sensors(stop_event):
     """
     WHAT: Master function to spawn all sensor threads.
@@ -215,12 +298,14 @@ def start_sensors(stop_event):
     proc_thread = threading.Thread(target=agent_worker_loop, args=(stop_event,), daemon=True)
     net_thread = threading.Thread(target=network_worker_loop, args=(stop_event,), daemon=True)
     fim_thread = threading.Thread(target=fim_worker_loop, args=(stop_event,), daemon=True)
+    rim_thread = threading.Thread(target=rim_worker_loop, args=(stop_event,), daemon=True)
     
     proc_thread.start()
     net_thread.start()
     fim_thread.start()
+    rim_thread.start()
     
-    return [proc_thread, net_thread, fim_thread]
+    return [proc_thread, net_thread, fim_thread, rim_thread]
 
 def main():
     """Fallback entry point if run directly."""

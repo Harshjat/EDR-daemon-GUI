@@ -36,6 +36,7 @@ class EDRDashboard:
         self.tree.tag_configure('normal', background='#1e1e1e', foreground='#d4d4d4')
         self.tree.tag_configure('network_blue', background='#002244', foreground='#88ccff') # Network Color
         self.tree.tag_configure('file_purple', background='#30004a', foreground='#dca3ff') # FIM Color
+        self.tree.tag_configure('registry_orange', background='#4a2500', foreground='#ffb366') # RIM Color
 
         self.refresh_logs()
 
@@ -101,6 +102,18 @@ class EDRDashboard:
                                         "Target: C:\\Users\\Public"         
                                     )
                                     tag = "file_purple"
+                                    
+                                elif event_type == "RegistryEvent":
+                                    row_data = (
+                                        time_str,
+                                        f"RIM: {data.get('action')}", 
+                                        "N/A",
+                                        "N/A",
+                                        f"{data.get('key_path')} -> {data.get('value_name')}",
+                                        "N/A",
+                                        f"Payload: {data.get('payload')}"         
+                                    )
+                                    tag = "registry_orange"
                                 else:
                                     continue
                                 
