@@ -35,6 +35,7 @@ class EDRDashboard:
         self.tree.tag_configure('warning_yellow', background='#4a4a00', foreground='white')
         self.tree.tag_configure('normal', background='#1e1e1e', foreground='#d4d4d4')
         self.tree.tag_configure('network_blue', background='#002244', foreground='#88ccff') # Network Color
+        self.tree.tag_configure('file_purple', background='#30004a', foreground='#dca3ff') # FIM Color
 
         self.refresh_logs()
 
@@ -87,6 +88,19 @@ class EDRDashboard:
                                         f"Local: {data.get('local_address', '')}"         
                                     )
                                     tag = "network_blue"
+                                    
+                                elif event_type == "FileEvent":
+                                    # Map FIM data logically into the existing columns
+                                    row_data = (
+                                        time_str,
+                                        f"FIM: {data.get('action')}", 
+                                        "N/A",
+                                        "N/A",
+                                        data.get("file_path", ""),                   
+                                        "N/A",
+                                        "Target: C:\\Users\\Public"         
+                                    )
+                                    tag = "file_purple"
                                 else:
                                     continue
                                 

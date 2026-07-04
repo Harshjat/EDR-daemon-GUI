@@ -8,6 +8,17 @@ from datetime import datetime
 import wmi
 import pythoncom
 import psutil  # Required for the Network Sensor
+import win32file
+import win32con
+
+FILE_LIST_DIRECTORY = 0x0001
+FIM_ACTION_MAP = {
+    1: "[CREATED]",
+    2: "[DELETED]",
+    3: "[MODIFIED]",
+    4: "[RENAMED FROM]",
+    5: "[RENAMED TO]"
+}
 
 # --- CONFIGURATION (INDUSTRY GRADE) ---
 PROGRAM_DATA_DIR = os.path.join(os.environ.get("PROGRAMDATA", "C:\\ProgramData"), "EDR_Agent")
@@ -139,6 +150,63 @@ def network_worker_loop(stop_event):
         except Exception:
             time.sleep(1)
 
+def fim_worker_loop(stop_event):
+    """
+    WHAT: File Integrity Monitoring (FIM) Sensor Thread.
+    """
+    target_dir = "C:\\Users\\Public"
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir, exist_ok=True)
+        
+    try:
+        # Acquire Directory Handle
+        hDir = win32file.CreateFile(
+            target_dir,
+            FILE_LIST_DIRECTORY,
+            win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE | win32con.FILE_SHARE_DELETE,
+            None,
+            win32con.OPEN_EXISTING,
+            win32con.FILE_FLAG_BACKUP_SEMANTICS,
+            None
+        )
+    except Exception as e:
+        write_telemetry({"error": f"FIM Init Failed: {e}", "timestamp": datetime.now().isoformat()})
+        return
+
+    change_filters = (
+        win32con.FILE_NOTIFY_CHANGE_FILE_NAME |
+        win32con.FILE_NOTIFY_CHANGE_DIR_NAME |
+        win32con.FILE_NOTIFY_CHANGE_ATTRIBUTES |
+        win32con.FILE_NOTIFY_CHANGE_SIZE |
+        win32con.FILE_NOTIFY_CHANGE_LAST_WRITE |
+        win32con.FILE_NOTIFY_CHANGE_SECURITY
+    )
+
+    while not stop_event.is_set():
+        try:
+            # Blocking API call. Because this thread is daemon=True, 
+            # the OS will safely kill it when the service shuts down.
+            results = win32file.ReadDirectoryChangesW(
+                hDir, 8192, True, change_filters, None, None
+            )
+            
+            # Use FILE_LOCK automatically via write_telemetry
+            for action_code, file_name in results:
+                action_str = FIM_ACTION_MAP.get(action_code, f"UNKNOWN:{action_code}")
+                full_path = os.path.join(target_dir, file_name)
+                
+                telemetry_payload = {
+                    "timestamp": datetime.now().isoformat(),
+                    "event_type": "FileEvent",
+                    "action": action_str,
+                    "file_path": full_path
+                }
+                write_telemetry(telemetry_payload)
+        except Exception:
+            time.sleep(1)
+            
+    win32file.CloseHandle(hDir)
+
 def start_sensors(stop_event):
     """
     WHAT: Master function to spawn all sensor threads.
@@ -146,11 +214,13 @@ def start_sensors(stop_event):
     """
     proc_thread = threading.Thread(target=agent_worker_loop, args=(stop_event,), daemon=True)
     net_thread = threading.Thread(target=network_worker_loop, args=(stop_event,), daemon=True)
+    fim_thread = threading.Thread(target=fim_worker_loop, args=(stop_event,), daemon=True)
     
     proc_thread.start()
     net_thread.start()
+    fim_thread.start()
     
-    return [proc_thread, net_thread]
+    return [proc_thread, net_thread, fim_thread]
 
 def main():
     """Fallback entry point if run directly."""
